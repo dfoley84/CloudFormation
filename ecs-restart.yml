@@ -1,0 +1,119 @@
+
+Parameters:
+  Rolename:
+    Type: String
+    Description: Policy Role Name
+  ECSCluster:
+    Type: String
+    Description: ECS Cluster Name
+
+Resources:
+  ECSResourceGroup:
+    Type: AWS::ResourceGroups::Group
+    Properties:
+      Name: ECS-Restart-Reource-Group
+      Description: ECS Restart Resource Group
+      ResourceQuery:
+        Type: "TAG_FILTERS_1_0"
+        Query:
+          ResourceTypeFilters:
+            - "AWS::ECS::Service"
+          TagFilters:
+            - Key: "Restart"
+              Values:
+                - "true"
+
+  AutomationServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref Rolename
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - 'ssm.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: RoleInline
+          PolicyDocument: 
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:*
+                  - ecs:*
+                  - resource-groups:*
+                  - tag:*
+                  - iam:PassRole
+                  - ec2:*
+                Resource: '*'
+
+  ECSUpdateDocument:
+        Type: AWS::SSM::Document
+        Properties:
+          TargetType: /AWS::ECS::Service
+          Content:
+            schemaVersion: '0.3'
+            assumeRole: !GetAtt AutomationServiceRole.Arn
+            description: 'RUN ECS Update'
+            parameters:
+              ServiceName:
+                type: String
+            mainSteps:
+              - name: ExecuteECSServiceUpdate
+                action: 'aws:executeAwsApi'
+                inputs: 
+                  Service: ecs
+                  Api: UpdateService
+                  cluster: !ref ECSCluster
+                  forceNewDeployment: true
+                  service: '{{ServiceName}}'
+          DocumentType: Automation
+          Name: ECSUpdateDocument
+
+  ECSDocumentation:
+    Type: AWS::SSM::Document
+    Properties:
+      TargetType: /AWS::ECS::Service
+      Content:
+        assumeRole: !GetAtt AutomationServiceRole.Arn
+        schemaVersion: '0.3'
+        description: 'RUN ECS Update Playbook'
+        mainSteps:
+          - name: RunECSDocumentation
+            action: aws:executeAutomation
+            inputs:
+              MaxErrors: '0'
+              MaxConcurrency: '1'
+              DocumentName: ECSUpdateDocument
+              TargetParameterName: ServiceName
+              Targets:
+                - Key: ResourceGroup
+                  Values: 
+                    - !Ref ECSResourceGroup  
+      DocumentType: Automation
+      Name: RunECSDocumentation
+  
+  MaintanceWindow:
+    Type: AWS::SSM::MaintenanceWindow
+    Properties:
+      Name: ECS-Daily-Services-Restart
+      Description: CRON Job to restart ECS Services at night.
+      Schedule: cron(0 0 * * ? *)
+      Duration: 2
+      Cutoff: 1
+      ScheduleTimezone: "GMT"
+      AllowUnassociatedTargets: false
+  
+  MaintanceWindowTasks:
+    Type: AWS::SSM::MaintenanceWindowTask
+    Properties:
+      WindowId: !Ref MaintanceWindow
+      Priority: 1
+      TaskArn: !Ref ECSDocumentation
+      TaskType: AUTOMATION
+
+  

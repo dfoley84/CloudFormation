@@ -1,0 +1,720 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  ECRImage:
+    Description: ECR Image
+    Type: String
+  ECRRepo:
+    Description: ECR Repo
+    Type: String
+  S3BucketName:
+    Description: S3 Bucket Name
+    Type: String
+  DBName:
+    Description: DB Name
+    Type: String
+  DBPassword:
+    Description: Master User Password
+    Type: String
+    NoEcho: true
+  RDSSecurityGroup:
+    Description: RDS Security Group
+    Type: String
+  DBSubnetGroup:
+    Description: DB Subnet Group Name
+    Type: String
+  LambdaSecurityGroup:
+    Description: Lambda Security Group
+    Type: 'AWS::EC2::SecurityGroup::Id'
+  Subnet1:
+    Description: Subnet 1
+    Type: 'AWS::EC2::Subnet::Id'
+  Subnet2:
+    Description: Subnet 2
+    Type: 'AWS::EC2::Subnet::Id'
+Resources:
+  CloudBuildRule:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: Prowler_CloudBuild_Role1
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/SecurityAudit'
+        - 'arn:aws:iam::aws:policy/job-function/ViewOnlyAccess'
+        - 'arn:aws:iam::aws:policy/ReadOnlyAccess'
+        - 'arn:aws:iam::aws:policy/AWSCodeBuildDeveloperAccess'
+        - 'arn:aws:iam::aws:policy/AWSLambdaExecute'
+      Policies:
+        - PolicyName: security-hub
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'securityhub:BatchImportFindings'
+                  - 'securityhub:GetFindings'
+                  - 'securityhub:UpdateFindings'
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:GetDownloadUrlForLayer'
+                Resource: '*'
+        - PolicyName: S3PutObject
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:*'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3Bucket}/*'
+                  - !Sub 'arn:aws:s3:::${S3Bucket}'
+        - PolicyName: RDSInline
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'rds:*'
+                Resource: !Sub 'arn:aws:rds:eu-west-1:*:db:${DBName}'
+        - PolicyName: SecretsInline
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:*'
+                Resource: !Sub 'arn:aws:secretsmanager:eu-west-1:*:secret:${DBName}'
+  CodePipelineRule:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: Prowler_Codepipeline_Role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AWSCodeBuildDeveloperAccess'
+        - 'arn:aws:iam::aws:policy/AWSLambdaExecute'
+      Policies:
+        - PolicyName: CodePipeline
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:PutImage'
+                  - 'ecr:DescribeImages'
+                Resource: '*'
+        - PolicyName: S3Codepipeline
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:*'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3Bucket}/*'
+                  - !Sub 'arn:aws:s3:::${S3Bucket}'
+        - PolicyName: InvokeLamba
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'lambda:*'
+                Resource: !Sub 'arn:aws:lambda:*:*:function:${LambdaFunction}'
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: Prowler_Lambda_Role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AWSCodeBuildDeveloperAccess'
+        - 'arn:aws:iam::aws:policy/AWSLambdaExecute'
+      Policies:
+        - PolicyName: S3BucketGetObject
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                  - 's3:DeleteObject'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3Bucket}/*'
+                  - !Sub 'arn:aws:s3:::${S3Bucket}'
+        - PolicyName: RDSInline
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'rds:*'
+                Resource: !Sub 'arn:aws:rds:*:*:db:${DBName}'
+        - PolicyName: SecretsInline
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:*'
+                Resource: !Sub 'arn:aws:secretsmanager:*:*:secret:${DBName}-*'
+        - PolicyName: LambdaInline
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:CreateNetworkInterface'
+                  - 'ec2:DescribeNetworkInterfaces'
+                  - 'ec2:AttachNetworkInterface'
+                  - 'ec2:DettachNetworkInterface'
+                  - 'ec2:DeleteNetworkInterface'
+                  - 'codepipeline:PutJobSuccessResult'
+                  - 'codepipeline:PutJobFailureResult'
+                  - 'codepipeline:GetJobDetails'
+                  - 'codepipeline:ListActionExecutions'
+                  - 'codepipeline:ListPipelineExecutions'
+                  - 'lambda:GetLayerVersion'
+                  - 'lambda:DeleteLayerVersion'
+                  - 'lambda:ListLayerVersions'
+                  - 'lambda:ListLayers'
+                  - 'lambda:AddLayerVersionPermission'
+                  - 'lambda:RemoveLayerVersionPermission'
+                Resource: '*'
+  S3Bucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Ref S3BucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+  RDSInstance:
+    Type: 'AWS::RDS::DBInstance'
+    Properties:
+      AllocatedStorage: 40
+      DBInstanceClass: db.t2.micro
+      DBInstanceIdentifier: !Ref DBName
+      Engine: MySQL
+      EngineVersion: 8.0.32
+      MasterUsername: admin
+      MasterUserPassword: !Ref DBPassword
+      DBName: !Ref DBName
+      PubliclyAccessible: true
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Tags:
+        - Key: Name
+          Value: !Ref DBName
+  RDSSecrets:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Description: RDS Secrets
+      Name: !Ref DBName
+      SecretString: !Sub '{"username": "admin", "password": "${DBPassword}"}'
+  CloudBuildProject:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: Prower_CloudBuild_SOC
+      Description: Prowler AWS Security Assessment
+      ServiceRole: !GetAtt CloudBuildRule.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      TimeoutInMinutes: 320
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: !Sub '${ECRImage}'
+        ImagePullCredentialsType: SERVICE_ROLE
+        EnvironmentVariables:
+          - Name: Compliance
+            Value: soc2_aws
+          - Name: S3Bucket
+            Value: !Ref S3BucketName
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - prowler -v
+                - echo $S3Bucket
+                - prowler aws --compliance soc2_aws -M csv json json-asff -S -B $S3Bucket || true 
+  CloudBuildCISAProject:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: Prower_CloudBuild_CISA
+      Description: Prowler AWS Security Assessment
+      ServiceRole: !GetAtt CloudBuildRule.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      TimeoutInMinutes: 320
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: !Sub '${ECRImage}'
+        ImagePullCredentialsType: SERVICE_ROLE
+        EnvironmentVariables:
+          - Name: Compliance
+            Value: soc2_aws
+          - Name: S3Bucket
+            Value: !Ref S3BucketName
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - prowler -v
+                - echo $S3Bucket
+                - prowler aws --compliance cisa_aws -M csv json json-asff -S -B $S3Bucket || true 
+  CloudBuildGDPRProject:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: Prower_CloudBuild_GDPR
+      Description: Prowler AWS Security Assessment
+      ServiceRole: !GetAtt CloudBuildRule.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      TimeoutInMinutes: 320
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: !Sub '${ECRImage}'
+        ImagePullCredentialsType: SERVICE_ROLE
+        EnvironmentVariables:
+          - Name: Compliance
+            Value: gdpr_aws
+          - Name: S3Bucket
+            Value: !Ref S3BucketName
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - prowler -v
+                - echo $S3Bucket
+                - prowler aws --compliance gdpr_aws -M csv json json-asff -S -B $S3Bucket || true 
+  CloudBuildNistProject:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: Prower_CloudBuild_Nist800
+      Description: Prowler AWS Security Assessment
+      ServiceRole: !GetAtt CloudBuildRule.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      TimeoutInMinutes: 320
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: !Sub '${ECRImage}'
+        ImagePullCredentialsType: SERVICE_ROLE
+        EnvironmentVariables:
+          - Name: Compliance
+            Value: nist_800_171_revision_2_aws
+          - Name: S3Bucket
+            Value: !Ref S3BucketName
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - prowler -v
+                - echo $S3Bucket
+                - prowler aws --compliance nist_800_171_revision_2_aws -M csv json json-asff -S -B $S3Bucket || true
+  CloudBuildawsauditProject:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: Prower_CloudBuild_AuditManager
+      Description: Prowler AWS Security Assessment
+      ServiceRole: !GetAtt CloudBuildRule.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      TimeoutInMinutes: 320
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: !Sub '${ECRImage}'
+        ImagePullCredentialsType: SERVICE_ROLE
+        EnvironmentVariables:
+          - Name: Compliance
+            Value: aws_audit_manager_control_tower_guardrails_aws
+          - Name: S3Bucket
+            Value: !Ref S3BucketName
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - prowler -v
+                - echo $S3Bucket
+                - prowler aws --compliance aws_audit_manager_control_tower_guardrails_aws -M csv json json-asff -S -B $S3Bucket || true
+  CloudBuildAllProject:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: Prower_CloudBuild_AllChecks
+      Description: Prowler AWS Security Assessment
+      ServiceRole: !GetAtt CloudBuildRule.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      TimeoutInMinutes: 320
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: !Sub '${ECRImage}'
+        ImagePullCredentialsType: SERVICE_ROLE
+        EnvironmentVariables:
+          - Name: Compliance
+            Value: aws_audit_manager_control_tower_guardrails_aws
+          - Name: S3Bucket
+            Value: !Ref S3BucketName
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - prowler -v
+                - echo $S3Bucket
+                - prowler aws -M csv json json-asff -S -B $S3Bucket || true
+
+              
+  LambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: Prowler_Lambda_Function
+      Description: Lambda Function to send Prowler Results to RDS
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 900
+      MemorySize: 5024
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref Subnet1
+          - !Ref Subnet2
+      Layers:
+        - 'arn:aws:lambda:eu-west-1::layer:Pandas:1'
+        - 'arn:aws:lambda:eu-west-1::layer:PyMySQL:1'
+        - 'arn:aws:lambda:eu-west-1::layer:SQLAlchemy:1'
+      Runtime: python3.8
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import csv
+          import pymysql
+          from sqlalchemy import create_engine
+          import pandas as pd
+          from io import StringIO
+
+          s3_client = boto3.client('s3')
+          rds_port = 3306
+          rds_user = 'admin'
+
+
+          def lambda_handler(event, context):
+              #Get User Parameters from Codepipeline
+              User_params = event['CodePipeline.job']['data']['actionConfiguration']['configuration']['UserParameters']
+              user_params = json.loads(User_params)
+
+              bucket_name = user_params['S3Bucket']
+              Compliance = user_params['Compliance']
+              RDSInstance = user_params['RDSInstance']
+              SecretName = user_params['SecretName']
+              job_id = event['CodePipeline.job']['id']
+              job_success = True
+              
+              try:
+                  #Get RDS Endpoint from RDS Instance
+                  rds_client = boto3.client('rds')
+                  rds_host = rds_client.describe_db_instances(DBInstanceIdentifier=RDSInstance)['DBInstances'][0]['Endpoint']['Address']
+
+                  #Get RDS Password from Secrets Manager
+                  secrets_client = boto3.client('secretsmanager', region_name='eu-west-1')
+                  password = secrets_client.get_secret_value(SecretId=SecretName)
+                  db_secret = password['SecretString']
+                  rds_password = json.loads(db_secret)['password']
+              
+                  #Code Block to Get the Most Recent .CSV File within the Bucket
+                  objects = s3_client.list_objects_v2(Bucket=bucket_name)['Contents']
+                  csv_files = [obj for obj in objects if obj['Key'].endswith('.csv')]
+                  sorted_csv_files = sorted(csv_files, key=lambda x: x['LastModified'], reverse=True)
+                  most_recent_csv_file = sorted_csv_files[0]['Key']
+
+                  #Read the CSV File 
+                  s3_object = s3_client.get_object(Bucket=bucket_name, Key=most_recent_csv_file)
+                  contents =  s3_object['Body'].read().decode('iso-8859-1').splitlines()
+                  
+                  #Using SQLAlchemy & Pandas Dump The CSV File into MYSQL Table
+                  engine = create_engine('mysql+pymysql://%s:%s@%s/%s' % (rds_user, rds_password, rds_host, RDSInstance), echo=False)
+                  csv_file = StringIO('\n'.join(contents))
+                  df = pd.read_csv(csv_file, delimiter=";")
+                  df.to_sql(Compliance, con=engine, if_exists='replace', index=False)
+
+                  #Delete the CSV File from S3
+                  s3_client.delete_object(Bucket=bucket_name, Key=most_recent_csv_file)
+
+              except Exception as e:
+                  job_success = False
+                  error_message = str(e)
+                  print(error_message)
+
+              #Notify Codepipeline of Success or Failure
+              code_pipeline = boto3.client('codepipeline')
+              if job_success:
+                  response = code_pipeline.put_job_success_result(jobId=job_id)
+                  print(response)
+              else:
+                  response = code_pipeline.put_job_failure_result(jobId=job_id, failureDetails={'message': error_message, 'type': 'JobFailed'})
+                  print(response)
+
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                          'status': 'success'
+                  })
+              }
+
+              
+  CodePipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      Name: Prowler_CodePipeline
+      RoleArn: !GetAtt CodePipelineRule.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref S3BucketName
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: '1'
+                Provider: ECR
+              Configuration:
+                RepositoryName: !Ref ECRRepo
+                ImageTag: latest
+              OutputArtifacts:
+                - Name: SourceOutput
+              RunOrder: 1
+        - Name: RunCodeBuild
+          Actions:
+            - Name: RunCodeBuildAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CloudBuildCISAProject
+              InputArtifacts:
+                - Name: SourceOutput
+              RunOrder: 2
+        - Name: RunLambdaCISA
+          Actions:
+            - Name: RunLambdaActionCISA
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Version: '1'
+                Provider: Lambda
+              Configuration:
+                FunctionName: Prowler_Lambda_Function
+                UserParameters: !Sub >-
+                  {"Compliance": "cisa_aws", "S3Bucket": "${S3BucketName}",
+                  "RDSInstance": "${RDSInstance}", "SecretName":
+                  "${RDSSecrets}"}
+              RunOrder: 3
+        - Name: RunCodeBuildSOC
+          Actions:
+            - Name: RunCodeBuildSOCAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CloudBuildProject
+              InputArtifacts:
+                - Name: SourceOutput
+              RunOrder: 4
+        - Name: RunLambdaSOC
+          Actions:
+            - Name: RunLambdaActionSOC
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Version: '1'
+                Provider: Lambda
+              Configuration:
+                FunctionName: Prowler_Lambda_Function
+                UserParameters: !Sub >-
+                  {"Compliance": "soc2_aws", "S3Bucket":
+                  "${S3BucketName}","RDSInstance": "${RDSInstance}",
+                  "SecretName": "${RDSSecrets}"}
+              RunOrder: 5
+        - Name: RunCodeBuildGDPR
+          Actions:
+            - Name: RunCodeBuildGDPRAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CloudBuildGDPRProject
+              InputArtifacts:
+                - Name: SourceOutput
+              RunOrder: 6
+        - Name: RunLambdaGDPR
+          Actions:
+            - Name: RunLambdaActionSOC
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Version: '1'
+                Provider: Lambda
+              Configuration:
+                FunctionName: Prowler_Lambda_Function
+                UserParameters: !Sub >-
+                  {"Compliance": "gdpr_aws", "S3Bucket":
+                  "${S3BucketName}","RDSInstance": "${RDSInstance}",
+                  "SecretName": "${RDSSecrets}"}
+              RunOrder: 7
+        - Name: RunCodeBuildNist
+          Actions:
+            - Name: RunCodeBuildNistAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CloudBuildNistProject
+              InputArtifacts:
+                - Name: SourceOutput
+              RunOrder: 8
+        - Name: RunLambdaNist
+          Actions:
+            - Name: RunLambdaActionNist
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Version: '1'
+                Provider: Lambda
+              Configuration:
+                FunctionName: Prowler_Lambda_Function
+                UserParameters: !Sub >-
+                  {"Compliance": "nist_aws", "S3Bucket":
+                  "${S3BucketName}","RDSInstance": "${RDSInstance}",
+                  "SecretName": "${RDSSecrets}"}
+              RunOrder: 9
+        - Name: RunCodebuildAduit
+          Actions:
+            - Name: RunCodeBuildAuditAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CloudBuildawsauditProject
+              InputArtifacts:
+                - Name: SourceOutput
+              RunOrder: 10
+        - Name: RunLambdaAduit
+          Actions:
+            - Name: RunLambdaActionNist
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Version: '1'
+                Provider: Lambda
+              Configuration:
+                FunctionName: Prowler_Lambda_Function
+                UserParameters: !Sub >-
+                  {"Compliance": "Aduit_aws", "S3Bucket":
+                  "${S3BucketName}","RDSInstance": "${RDSInstance}",
+                  "SecretName": "${RDSSecrets}"}
+              RunOrder: 11
+        - Name: RunCodebuilAll
+          Actions:
+            - Name: RunCodeBuildAllAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CloudBuildAllProject
+              InputArtifacts:
+                - Name: SourceOutput
+              RunOrder: 12
+        - Name: RunLambdaAll
+          Actions:
+            - Name: RunLambdaActionAll
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Version: '1'
+                Provider: Lambda
+              Configuration:
+                FunctionName: Prowler_Lambda_Function
+                UserParameters: !Sub >-
+                  {"Compliance": "AllChecks", "S3Bucket":
+                  "${S3BucketName}","RDSInstance": "${RDSInstance}",
+                  "SecretName": "${RDSSecrets}"}
+              RunOrder: 13

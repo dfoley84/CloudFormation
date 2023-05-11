@@ -1,0 +1,398 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: ''
+Parameters:
+  RDSAvailabilityZone:
+    Type: 'AWS::EC2::AvailabilityZone::Name'
+    Description: Availability Zone For RDS Snapshot
+  DBSubnetGroup:
+    Type: String
+    Description: DB Subnet Group Name
+  RDSInstanceSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup::Id'
+    Description: RDS Instance Security Group
+  Subnet1:
+    Description: Subnet 1 for Lambda
+    Type: 'AWS::EC2::Subnet::Id'
+  Subnet2:
+    Description: Subnet 2 for Lambda
+    Type: 'AWS::EC2::Subnet::Id'
+  LambdaSecurityGroup:
+    Description: Lambda Security Group
+    Type: 'AWS::EC2::SecurityGroup::Id'
+  SNSTopicName:
+    Type: String
+    Description: SNS Topic Name
+  DBTableName:
+    Type: String
+    Description: DB Table Name to Test Select 1 on
+  
+
+Resources:
+  RDSResourceGroup:
+    Type: 'AWS::ResourceGroups::Group'
+    Properties:
+      Name: RDS-DB-Validation-Group
+      Description: RDS Snapshot Restore Validation Group
+      ResourceQuery:
+        Type: TAG_FILTERS_1_0
+        Query:
+          ResourceTypeFilters:
+            - 'AWS::RDS::DBSnapshot'
+          TagFilters:
+            - Key: Test
+              Values:
+                - 'true'
+
+  AutomationRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: RDSSnapshotValidationRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ssm.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: InlineRole
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ssm:*'
+                  - 'rds:*'
+                  - 'lambda:*'
+                  - 'resource-groups:*'
+                  - 'tag:*'
+                  - 'iam:PassRole'
+                  - 'ec2:*'
+                  - 'cloudformation:*'
+                  - 'cloudwatch:*'
+                  - 's3:*'
+                  - 'sns:*'
+                Resource: '*'
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: RDSSnapshotValidationLambdaRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole'
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AmazonRDSFullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonSSMFullAccess'
+      Policies:
+        - PolicyName: LambdaExecution
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: 'arn:aws:logs:*:*:*'
+        - PolicyName: LambdaInline
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'sns:*'
+                Resource: '*'
+
+  SNSTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      TopicName: !Ref SNSTopicName
+      DisplayName: RDS Snapshot Validation Topic
+
+
+  SNSTopicLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Role: !GetAtt LambdaRole.Arn
+      FunctionName: RDS-Snapshot-Validation-SNS-Lambda
+      Handler: index.lambda_handler
+      Timeout: 900
+      Runtime: python3.8
+      Code:
+        ZipFile: |
+          import urllib3
+          import json
+          http = urllib3.PoolManager()
+          def lambda_handler(event, context):
+              url = "https://hooks.slack.com/"
+
+              msg = {
+                  "channel": "#elastic-alerts",
+                  "text": event['Records'][0]['Sns']['Message'],
+                  "icon_emoji": ""
+              }
+              
+              encoded_msg = json.dumps(msg).encode('utf-8')
+              resp = http.request('POST',url, body=encoded_msg)
+              print({
+                  "message": event['Records'][0]['Sns']['Message'], 
+                  "status_code": resp.status, 
+                  "response": resp.data
+              })
+
+  SNSLambdaTrigger:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref SNSTopicLambda
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref SNSTopic
+
+  LambdaSubscription:
+    Type: 'AWS::SNS::Subscription'
+    Properties:
+      TopicArn: !Ref SNSTopic
+      Protocol: lambda
+      Endpoint: !GetAtt SNSTopicLambda.Arn
+  LambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: RDSSnapshotValidationLambda
+      Description: Lambda function to validate RDS Snapshot
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 900
+      Runtime: python3.8
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref Subnet1
+          - !Ref Subnet2
+      Code:
+        ZipFile: |
+          import mysql.connector
+          import json
+          import boto3
+
+          def lambda_handler(event, context):
+              DBInstanceEndpointName = event['DBInstanceEndpointName']
+              DBMasterPassword = event['DBMasterPassword']
+              userName = event['userName']
+              DBTableName = event['DBTableName']
+              config = {
+                  'user': userName,
+                  'password': DBMasterPassword,
+                  'host': DBInstanceEndpointName,
+                  'database': DBTableName
+              }
+
+
+              # Connect to the database   
+              try:
+                  conn = mysql.connector.connect(**config)
+                  cursor = conn.cursor()
+
+                  #Run Select 1 query
+                  cursor.execute("SELECT 1")
+                  result = cursor.fetchone()
+                  print("Select 1 query result: {}".format(result))
+
+                  #If Select 1 query is successful, return success message
+                  if result[0] == 1:
+                      response = {
+                          'statusCode': 200,
+                          'message': 'Database {} Vaildation successful!'.format(DBInstanceEndpointName),
+                          'body': json.dumps('Database Vaildation successful!')
+                      }
+                  else: 
+                      response = {
+                          'statusCode': 500,
+                          'message': 'Database {} Vaildation failed!'.format(DBInstanceEndpointName),
+                          'body': json.dumps('Database Vaildation failed!')
+                      }
+                  cursor.close()
+                  conn.close()
+              except Exception as e:
+                  print("Database connection failed due to {}".format(e))
+                  response = {
+                      'status': 'error',
+                      'message': 'Database {} connection failed!'.format(DBInstanceEndpointName),
+                      'body': json.dumps('Database connection failed!')
+                  }
+              return response
+    
+  AutomationDocument:
+    Type: 'AWS::SSM::Document'
+    Properties:
+      TargetType: '/AWS::RDS::DBSnapshot'
+      Content:
+        schemaVersion: '0.3'
+        description: Run Validation Playbook
+        assumeRole: !GetAtt AutomationRole.Arn
+        parameters:
+          frequency:
+            type: String
+            default: 'cron(0 20 ? * 6#1 *)'
+            description: Run on the First Friday of every month at 8 PM UTC
+        mainSteps:
+          - name: RunRDSValidation
+            action: 'aws:executeAutomation'
+            inputs:
+              MaxErrors: '0'
+              MaxConcurrency: '1'
+              DocumentName: RDSSnapshotRestore2
+              TargetParameterName: DBInstanceIdentifier
+              Targets:
+                - Key: ResourceGroup
+                  Values:
+                    - !Ref RDSResourceGroup
+            outputs:
+              - Name: DBInstanceIdentifier
+                Selector: DBInstanceIdentifier
+      DocumentType: Automation
+      Name: RDSSnapshotValidation
+  RDSSnapshotRestore:
+    Type: 'AWS::SSM::Document'
+    Properties:
+      Content:
+        schemaVersion: '0.3'
+        assumeRole: !GetAtt AutomationRole.Arn
+        description: Restore RDS Snapshot
+        parameters:
+          DBInstanceIdentifier:
+            type: String
+          DBMasterPassword:
+            type: String
+            default: <<CHANGEME>>
+          DBTableName:
+            type: String
+            default: !Ref DBTableName
+          SNSTOPIC:
+            type: String
+            default: !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SNSTopicName}'
+        mainSteps:
+          - name: RestoreSnapshot
+            action: 'aws:executeAwsApi'
+            inputs:
+              Service: rds
+              Api: restoreDBInstanceFromDBSnapshot
+              DBInstanceIdentifier: '{{ DBInstanceIdentifier }}-snapshot'
+              DBSnapshotIdentifier: '{{ DBInstanceIdentifier }}'
+              AvailabilityZone: !Ref RDSAvailabilityZone
+              DBSubnetGroupName: !Ref DBSubnetGroup
+              DBInstanceClass: db.t2.micro
+              PubliclyAccessible: false
+              VpcSecurityGroupIds:
+                - !Ref RDSInstanceSecurityGroup
+            outputs:
+              - Name: DBInstanceArn
+                Selector: DBInstance.DBInstanceArn
+          - name: WaitForDBAvailable
+            action: 'aws:waitForAwsResourceProperty'
+            maxAttempts: 60
+            timeoutSeconds: 600
+            inputs:
+              Service: rds
+              Api: describeDBInstances
+              DBInstanceIdentifier: '{{ DBInstanceIdentifier }}-snapshot'
+              PropertySelector: '$.DBInstances[0].DBInstanceStatus'
+              DesiredValues:
+                - available
+          - name: ModifyDBPassword
+            action: 'aws:executeAwsApi'
+            inputs:
+              Service: rds
+              Api: modifyDBInstance
+              DBInstanceIdentifier: '{{ DBInstanceIdentifier }}-snapshot'
+              MasterUserPassword: '{{ DBMasterPassword }}'
+              ApplyImmediately: true
+          - name: Sleep
+            action: 'aws:sleep'
+            inputs:
+              Duration: PT2M
+          - name: WaitforPasswordReset
+            action: 'aws:waitForAwsResourceProperty'
+            maxAttempts: 60
+            timeoutSeconds: 600
+            inputs:
+              Service: rds
+              Api: describeDBInstances
+              DBInstanceIdentifier: '{{ DBInstanceIdentifier }}-snapshot'
+              PropertySelector: '$.DBInstances[0].DBInstanceStatus'
+              DesiredValues:
+                - available
+          - name: GetInstanceDetails
+            action: 'aws:executeAwsApi'
+            inputs:
+              Service: rds
+              Api: describeDBInstances
+              DBInstanceIdentifier: '{{ DBInstanceIdentifier }}-snapshot'
+            outputs:
+              - Name: DBInstanceEndpoint
+                Selector: '$.DBInstances[0].Endpoint.Address'
+                Type: String
+              - Name: MasterUserNameIdentifier
+                Selector: '$.DBInstances[0].MasterUsername'
+                Type: String
+          - name: InvokeLambda
+            action: 'aws:invokeLambdaFunction'
+            timeoutSeconds: 9200
+            inputs:
+              FunctionName: RDSSnapshotValidationLambda
+              InvocationType: RequestResponse
+              Payload: |
+                {
+                  "DBInstanceEndpointName": "{{ GetInstanceDetails.DBInstanceEndpoint }}",
+                  "DBMasterPassword": "{{ DBMasterPassword }}",
+                  "userName": "{{ GetInstanceDetails.MasterUserNameIdentifier }}",
+                  "DBTableName": "{{ DBTableName }}"
+                }
+            outputs:
+              - Name: OutputPayloadLambda
+                Selector: $.Payload.body
+                Type: String
+          - name: PublishSNSMessage
+            action: 'aws:executeAwsApi'
+            inputs:
+              Service: sns
+              Api: publish
+              TopicArn: '{{ SNSTOPIC }}'
+              Message: '{{ InvokeLambda.Payload }}'
+              Subject: RDS Snapshot Restore Status
+
+          - name: DeleteRDSInstance
+            action: 'aws:executeAwsApi'
+            inputs:
+              Service: rds
+              Api: deleteDBInstance
+              DBInstanceIdentifier: '{{ DBInstanceIdentifier }}-snapshot'
+              SkipFinalSnapshot: true
+      DocumentType: Automation
+      Name: RDSSnapshotRestore
+
+  MaintanceWindow:
+    Type: AWS::SSM::MaintenanceWindow
+    Properties:
+      Name: RDSVaildation-CronJob
+      Description: Cron Job to run RDS Vaildation
+      Schedule: cron(0 20 ? * 6 *)
+      Duration: 2
+      Cutoff: 1
+      AllowUnassociatedTargets: false
+    
+  MaintenanceWindowTarget:
+    Type: AWS::SSM::MaintenanceWindowTask
+    Properties:
+      WindowId: !Ref MaintanceWindow
+      TaskArn: !Ref AutomationDocument
+      Priority: 1
+      TaskType: AUTOMATION
